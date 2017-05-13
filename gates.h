@@ -59,11 +59,6 @@ class TimerPair
         {
             return this->timerHigh.GetEntityId();
         }
-        void AppendBlocks(CubeGrid* cubegrid)
-        {
-            cubegrid->blocks.AddBlock(&timerLow);
-            cubegrid->blocks.AddBlock(&timerHigh);
-        }
         void AddSwitch(TimerPair& toSwitch, bool negate = false)
         {
             timerLow.toolbar.AddEntry(negate ? "OnOff_Off" : "OnOff_On", toSwitch.timerLow);
@@ -88,21 +83,29 @@ class TimerPair
             AddSwitch(toConnect, false);
             AddUpdate(toConnect);
         }
-        void RConnect(TimerPair& toRConnect)
+        void NegatedConnect(TimerPair& toConnect)
         {
-            AddSwitch(toRConnect, true);
-            AddUpdate(toRConnect);
+            AddSwitch(toConnect, true);
+            AddUpdate(toConnect);
         }
 };
 
 typedef TimerBlock Updater;
 /*class Updater : public TimerBlock {};*/
 
+struct Hook
+{
+    TimerPair& input;
+    Updater& updater;
+    Hook(TimerPair& _input, Updater& _updater) : input(_input), updater(_updater) {}
+};
+
 template <unsigned input_count> class LogicGate
 {
-    friend class Circuit;
+    friend class DebugInput;
+    friend class CircuitCubegridManager;
+
     protected:
-        CubeGrid cubegrid;
         TimerPair inputs[input_count];
         TimerPair output;
         Updater updater;
@@ -134,7 +137,6 @@ template <unsigned input_count> class LogicGate
             output.SetCoords(input_count, 0, 0, TimerPair::LOW);
             output.SetCoords(input_count, 1, 0, TimerPair::HIGH);
             output.PrependToName("output ");
-            output.AppendBlocks(&cubegrid);
         }
 
         virtual void SetupInputs()
@@ -144,7 +146,6 @@ template <unsigned input_count> class LogicGate
                 inputs[i].SetCoords(i, 0, 0, TimerPair::LOW);
                 inputs[i].SetCoords(i, 1, 0, TimerPair::HIGH);
                 inputs[i].PrependToName(std::string("input ") + this->GenerateLetter(i) + std::string(" "));
-                inputs[i].AppendBlocks(&cubegrid);
             }
         }
 
@@ -160,27 +161,33 @@ template <unsigned input_count> class LogicGate
                 inputs[i].AppendToName(toAppend);
             output.AppendToName(toAppend);
         }
-        virtual void HookOutputTo(TimerPair& input, Updater& updater)
+        virtual void HookOutputTo(Hook hook)
         {
-            output.AddSwitch(input);
-            output.AddUpdate(updater);
+            output.AddSwitch(hook.input);
+            output.AddUpdate(hook.updater);
+        }
+        virtual Hook GetHook(unsigned inputIndex)
+        {
+            if (inputIndex >= input_count)
+                throw std::out_of_range("Input index out of range");
+            else return Hook(this->inputs[inputIndex], this->updater);
         }
 };
 
 template <unsigned input_count> class AndGate : public LogicGate<input_count>
 {
-    friend class Circuit;
+    friend class DebugInput;
+    friend class CircuitCubegridManager;
+
     protected:
 
         void SetupUpdater()
         {
-            this->updater.Coords.x = input_count + 1;
             this->updater.CustomName = "AND updater";
             for (unsigned i = 0; i < input_count; ++i)
                 this->updater.toolbar.AddEntry("TriggerNow", this->inputs[i].GetHookHigh());
             for (unsigned i = 0; i < input_count; ++i)
                 this->updater.toolbar.AddEntry("TriggerNow", this->inputs[i].GetHookLow());
-            this->cubegrid.blocks.AddBlock(&this->updater);
         }
         void SetupOutput() override
         {
@@ -213,18 +220,17 @@ template <unsigned input_count> class AndGate : public LogicGate<input_count>
 
 template <unsigned input_count> class OrGate : public LogicGate<input_count>
 {
-    friend class Circuit;
+    friend class DebugInput;
+    friend class CircuitCubegridManager;
 
     private:
         void SetupUpdater()
         {
-            this->updater.Coords.x = input_count + 1;
             this->updater.CustomName = "OR updater";
             for (unsigned i = 0; i < input_count; ++i)
                 this->updater.toolbar.AddEntry("TriggerNow", this->inputs[i].timerLow);
             for (unsigned i = 0; i < input_count; ++i)
                 this->updater.toolbar.AddEntry("TriggerNow", this->inputs[i].timerHigh);
-            this->cubegrid.blocks.AddBlock(&this->updater);
         }
         void SetupOutput() override
         {
@@ -255,14 +261,15 @@ template <unsigned input_count> class OrGate : public LogicGate<input_count>
 
 class NotGate : public LogicGate<1>
 {
+    friend class DebugInput;
+    friend class CircuitCubegridManager;
+
     private:
         void SetupUpdater()
         {
-            updater.Coords.x = 2;
             updater.CustomName = "NOT updater";
             updater.toolbar.AddEntry("TriggerNow", this->inputs[0].GetHookLow());
             updater.toolbar.AddEntry("TriggerNow", this->inputs[0].GetHookHigh());
-            this->cubegrid.blocks.AddBlock(&updater);
         }
         void SetupOutput() override
         {
@@ -272,7 +279,7 @@ class NotGate : public LogicGate<1>
         void SetupInputs() override
         {
             this->inputs[0].PrependToName("NOT ");
-            this->inputs[0].RConnect(this->output);
+            this->inputs[0].NegatedConnect(this->output);
         }
     public:
         NotGate()
@@ -290,29 +297,25 @@ class NotGate : public LogicGate<1>
 
 class DebugInput
 {
-    friend class Circuit;
-    TimerBlock debug;
+    friend class CircuitCubegridManager;
 
+    private:
+        TimerBlock debug;
     public:
-
-        void HookDebugTo(TimerPair& input, Updater& updater)
+        void HookDebugTo(Hook hook)
         {
-            debug.toolbar.AddEntry("OnOff", input.GetHookLow());
-            debug.toolbar.AddEntry("OnOff", input.GetHookHigh());
-            debug.toolbar.AddEntry("TriggerNow", updater);
-            std::size_t highLow = input.timerLow.CustomName().find("L");
+            debug.toolbar.AddEntry("OnOff", hook.input.GetHookLow());
+            debug.toolbar.AddEntry("OnOff", hook.input.GetHookHigh());
+            debug.toolbar.AddEntry("TriggerNow", hook.updater);
+            std::size_t highLow = hook.input.timerLow.CustomName().find("L");
             if (highLow != std::string::npos)
-                debug.CustomName = std::string("Debug ") + input.timerLow.CustomName().substr(0, highLow) + input.timerLow.CustomName().substr(highLow+2, std::string::npos);
+                debug.CustomName = std::string("Debug ") + hook.input.timerLow.CustomName().substr(0, highLow) + hook.input.timerLow.CustomName().substr(highLow+2, std::string::npos);
         }
         void SetCoords(uint64_t x, uint64_t y, uint64_t z)
         {
             debug.Coords.x = x;
             debug.Coords.y = y;
             debug.Coords.z = z;
-        }
-        void AppendBlocks(CubeGrid* cubegrid)
-        {
-            cubegrid->blocks.AddBlock(&debug);
         }
 };
 
@@ -341,6 +344,26 @@ class CircuitCubegridManager
             cubegrid.blocks.AddBlock(&logicGate.output.timerHigh);
             cubegrid.blocks.AddBlock(&logicGate.updater);
         }
+        void AddDebug(DebugInput& debugInput)
+        {
+            cubegrid.blocks.AddBlock(&debugInput.debug);
+        }
+        void AssignCoords(unsigned width)
+        {
+            for (std::size_t i = 0; i < cubegrid.blocks.size(); ++i)
+            {
+                cubegrid.blocks[i]->Coords.x = i/width;
+                cubegrid.blocks[i]->Coords.y = i%width;
+            }
+        }
+        CubeGrid GetStdMoveCubegrid()
+        {
+            return std::move(this->cubegrid);
+        }
+        CubeGrid GetCubegrid()
+        {
+            return this->cubegrid;
+        }
 };
 
 class Circuit
@@ -349,25 +372,29 @@ class Circuit
         Blueprint blueprint;
         CircuitCubegridManager mainCg;
     public:
-        AndGate<1> ands[2];
-        NotGate nots[1];
-        DebugInput debugInputs[1];
+        #define INPUTS 2
+        #define OUTPUTS 4
+        AndGate<INPUTS> ands[OUTPUTS];
+        NotGate nots[INPUTS];
+        DebugInput debugInputs[INPUTS];
 
         void BuildXml()
         {
-            unsigned inputs = 1;
-            unsigned outputs = 2;
+            unsigned inputs = INPUTS;
+            unsigned outputs = OUTPUTS;
 
             for (unsigned i = 0; i < inputs; i++)
             {
-                debugInputs[i].SetCoords(-3, i, 0);
+                mainCg.AddGate(nots[i]);
+                mainCg.AddDebug(debugInputs[i]);
                 nots[i].AppendToName(std::string(" ")+std::to_string(i));
-                nots[i].cubegrid.TranslateCoords(0, 0, i);
+                //nots[i].cubegrid.TranslateCoords(0, 0, i);
             }
             for (unsigned i = 0; i < outputs; i++)
             {
+                mainCg.AddGate(ands[i]);
                 ands[i].AppendToName(std::string(" ")+std::to_string(i));
-                ands[i].cubegrid.TranslateCoords(0, 0, (i+inputs+2));
+//                ands[i].cubegrid.TranslateCoords(0, 0, (i+inputs+2));
             }
 
             /*std::bitset<2> perm;
@@ -380,23 +407,15 @@ class Circuit
             }*/
             for (unsigned i = 0; i < inputs; i++)
             {
-                debugInputs[i].HookDebugTo(nots[i].inputs[0], nots[i].updater);
+                debugInputs[i].HookDebugTo(nots[i].GetHook(0));
                 unsigned power = static_cast<unsigned>(pow(2, i+1));
                 for (unsigned j = 0; j < outputs; j++)
                 {
                     if ((j % power) < power/2)
-                        nots[i].HookOutputTo(ands[j].inputs[i], ands[j].updater);
-                    else debugInputs[i].HookDebugTo(ands[j].inputs[i], ands[j].updater);
+                        nots[i].HookOutputTo(ands[j].GetHook(i));
+                    else debugInputs[i].HookDebugTo(ands[j].GetHook(i));
                 }
             }
-            /*nots[0].HookOutputTo(&ands[0].inputs[0], &ands[0].updater);
-            nots[0].HookOutputTo(&ands[2].inputs[1], &ands[2].updater);
-            nots[1].HookOutputTo(&ands[0].inputs[1], &ands[0].updater);
-            nots[1].HookOutputTo(&ands[1].inputs[1], &ands[1].updater);
-            debugInputs[0].HookDebugTo(&ands[1].inputs[0], &ands[1].updater);
-            debugInputs[0].HookDebugTo(&ands[3].inputs[1], &ands[3].updater);
-            debugInputs[1].HookDebugTo(&ands[2].inputs[0], &ands[2].updater);
-            debugInputs[1].HookDebugTo(&ands[3].inputs[0], &ands[3].updater);*/
             CubeGrid armorCb;
             ArmorBlock armor;
             armor.Coords.y = -1;
@@ -411,15 +430,18 @@ class Circuit
             }
             blueprint.Cubegrids.push_back(armorCb);
 
-            for (unsigned i = 0; i < inputs; i++)
-                blueprint.Cubegrids.push_back(std::move(nots[i].cubegrid));
-            for (unsigned i = 0; i < outputs; i++)
-                blueprint.Cubegrids.push_back(std::move(ands[i].cubegrid));
+            //for (unsigned i = 0; i < inputs; i++)
+            //    blueprint.Cubegrids.push_back(std::move(nots[i].cubegrid));
+            //for (unsigned i = 0; i < outputs; i++)
+            //    blueprint.Cubegrids.push_back(std::move(ands[i].cubegrid));
 
-            CubeGrid debug;
-            for (unsigned i = 0; i < inputs; i++)
-                debugInputs[i].AppendBlocks(&debug);
-            blueprint.Cubegrids.push_back(std::move(debug));
+            mainCg.AssignCoords(5);
+            blueprint.Cubegrids.push_back(mainCg.GetStdMoveCubegrid());
+
+            //CubeGrid debug;
+            //for (unsigned i = 0; i < inputs; i++)
+            //    debugInputs[i].AppendBlocks(&debug);
+            //blueprint.Cubegrids.push_back(std::move(debug));
 
             //blueprint.MergeCubegrids();
 
